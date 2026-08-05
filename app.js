@@ -10,7 +10,6 @@ let selectedManualPayer = null;
 let manualSplitAssignees = new Set();
 let logsBeforeId = null;
 
-// Rolling Month Carousel State
 let currentDate = new Date();
 
 const $ = (id) => document.getElementById(id);
@@ -119,6 +118,37 @@ $("next-month-btn").addEventListener("click", async () => {
   currentDate.setMonth(currentDate.getMonth() + 1);
   updateMonthDisplay();
   await refreshMonthData();
+});
+
+// ---------- AI Settings Modal ----------
+
+$("ai-settings-btn").addEventListener("click", async () => {
+  try {
+    const settings = await api("/api/settings");
+    if (settings.masked_key) {
+      $("ai-key-input").placeholder = `Current Key: ${settings.masked_key}`;
+    }
+  } catch (e) {}
+  openModal("ai-settings-modal");
+});
+
+$("save-ai-key-btn").addEventListener("click", async () => {
+  const key = $("ai-key-input").value.trim();
+  $("ai-settings-error").textContent = "";
+  if (!key) {
+    $("ai-settings-error").textContent = "Please enter an API Key";
+    return;
+  }
+  try {
+    await api("/api/settings", {
+      method: "POST",
+      body: JSON.stringify({ gemini_key: key }),
+    });
+    alert("Gemini AI Key saved! Your receipt uploads will now use Gemini Vision AI.");
+    closeModal("ai-settings-modal");
+  } catch (err) {
+    $("ai-settings-error").textContent = err.message;
+  }
 });
 
 // ---------- Init ----------
@@ -374,7 +404,6 @@ function renderPayerButtons() {
     });
   }
 
-  // Render Cash Split People Selection Buttons (Unclicked by default)
   const splitContainer = $("manual-split-people");
   if (splitContainer) {
     splitContainer.innerHTML = "";
@@ -437,7 +466,7 @@ $("file-input").addEventListener("change", async (e) => {
   formData.append("month", currentMonth());
   formData.append("file", file);
 
-  showSpinner("Reading & translating receipt with GPU AI…", 1);
+  showSpinner("Reading & translating receipt with AI…", 1);
   try {
     const newBill = await fetch("/api/bills/upload", { method: "POST", body: formData }).then(
       async (res) => {
@@ -465,7 +494,7 @@ $("file-input").addEventListener("change", async (e) => {
 
 $("manual-btn").addEventListener("click", () => {
   selectedManualPayer = me ? me.id : null;
-  manualSplitAssignees = new Set(); // Unclicked by default as requested!
+  manualSplitAssignees = new Set();
   $("cash-title-input").value = "";
   $("cash-amount-input").value = "";
   $("cash-guest-checkbox").checked = false;
@@ -773,7 +802,7 @@ function renderItemRow(bill, item) {
   const reviewBadge = document.createElement("button");
   reviewBadge.type = "button";
   reviewBadge.className = "review-badge" + (item.needs_review ? "" : " hidden");
-  reviewBadge.textContent = "⚠️ Translated to English — click names below to assign";
+  reviewBadge.textContent = "⚠️ Click names below to select who this item belongs to";
   reviewBadge.addEventListener("click", async () => {
     try {
       const updated = await api(`/api/items/${item.id}`, {
@@ -791,7 +820,6 @@ function renderItemRow(bill, item) {
   const assignees = document.createElement("div");
   assignees.className = "assignees";
   
-  // Render unclicked avatar buttons for standard household people
   people.forEach((p) => {
     const btn = document.createElement("button");
     btn.type = "button";
@@ -826,7 +854,6 @@ function renderItemRow(bill, item) {
     assignees.appendChild(btn);
   });
 
-  // Render buttons for any temporary guests assigned to this item
   const guestIds = item.assignee_ids.filter(id => id.startsWith("guest_"));
   guestIds.forEach((gid) => {
     const gName = gid.replace("guest_", "");
@@ -856,7 +883,6 @@ function renderItemRow(bill, item) {
     assignees.appendChild(btn);
   });
 
-  // Add Guest for this specific item button
   const addGuestBtn = document.createElement("button");
   addGuestBtn.type = "button";
   addGuestBtn.className = "avatar-btn";

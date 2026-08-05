@@ -1,5 +1,5 @@
 """
-Hisab Web Application Server with Fast AI Receipt OCR & Persistence
+Hisab Web Application Server with Fast AI Receipt OCR & SQLite Persistence
 Runs on Render.com or Localhost.
 """
 
@@ -17,7 +17,6 @@ app = Flask(__name__, static_folder=".")
 app.secret_key = "hisab_secret_key_local"
 
 DB_PATH = os.environ.get("DB_PATH", "database.db")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 LOCAL_AI_URL = os.environ.get("LOCAL_AI_URL", "http://127.0.0.1:8001/read-receipt")
 
 # ---------- Database Initialization ----------
@@ -73,6 +72,13 @@ def init_db():
         )
         """)
 
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """)
+
         cursor.execute("SELECT COUNT(*) FROM people")
         if cursor.fetchone()[0] == 0:
             cursor.executemany("INSERT INTO people (id, name) VALUES (?, ?)", [
@@ -84,15 +90,22 @@ def init_db():
 
 init_db()
 
+def get_setting(key_name, default=""):
+    with get_db() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key_name,)).fetchone()
+        if row: return row["value"]
+    return os.environ.get(key_name, default)
+
 # ---------- Fast Receipt AI Processing ----------
 
 def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
     b64_img = base64.b64encode(image_bytes).decode("utf-8")
+    gemini_key = get_setting("GEMINI_API_KEY")
 
     # 1. Try Gemini Vision API if key available (Fast cloud OCR)
-    if GEMINI_API_KEY:
+    if gemini_key:
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
             prompt_text = """
             Analyze this clothing or store receipt image carefully.
             Extract all purchased items and their exact final price in euros.
@@ -115,10 +128,10 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
                 data=payload,
                 headers={
                     'Content-Type': 'application/json',
-                    'x-goog-api-key': GEMINI_API_KEY
+                    'x-goog-api-key': gemini_key
                 }
             )
-            with urllib.request.urlopen(req, timeout=6) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 if resp.status == 200:
                     res_data = json.loads(resp.read().decode('utf-8'))
                     text_out = res_data['candidates'][0]['content']['parts'][0]['text']
@@ -152,7 +165,7 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
     except Exception:
         pass
 
-    # 3. Fallback extraction (KiK clothing receipt items format)
+    # 3. Fallback KiK clothing items
     return [
         {"name": "Drinking Bottle", "original_name": "Trinkflasche", "price": 2.99},
         {"name": "Men's Trousers", "original_name": "Herren-Hose", "price": 7.99},
@@ -172,6 +185,21 @@ def static_files(filename):
     return send_from_directory(".", filename)
 
 # ---------- API Endpoints ----------
+
+@app.route("/api/settings", methods=["GET", "POST"])
+def settings_api():
+    with get_db() as conn:
+        if request.method == "POST":
+            data = request.json or {}
+            gemini_key = data.get("gemini_key", "").strip()
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('GEMINI_API_KEY', ?)", (gemini_key,))
+            conn.commit()
+            return jsonify({"success": True})
+        
+        gkey = get_setting("GEMINI_API_KEY")
+        # Mask key for privacy
+        masked = (gkey[:6] + "..." + gkey[-4:]) if len(gkey) > 10 else gkey
+        return jsonify({"gemini_key_set": bool(gkey), "masked_key": masked})
 
 @app.route("/api/session", methods=["GET"])
 def get_session():
