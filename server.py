@@ -1,12 +1,13 @@
 """
-Hisab Web Application Server
-Serves the improved web frontend and backend APIs.
+Hisab Web Application Server with SQLite Persistence
+Saves all people, bills, items, and logs permanently in database.db!
 Runs on Render.com or Localhost.
 """
 
 import os
 import json
 import re
+import sqlite3
 import base64
 import urllib.request
 import urllib.parse
@@ -16,25 +17,82 @@ from flask import Flask, send_from_directory, request, jsonify
 app = Flask(__name__, static_folder=".")
 app.secret_key = "hisab_secret_key_local"
 
-PEOPLE = [
-    {"id": "p1", "name": "Omar"},
-    {"id": "p2", "name": "Sarah"},
-    {"id": "p3", "name": "Alex"}
-]
-
-BILLS = []
-LOGS = []
-
+DB_PATH = os.environ.get("DB_PATH", "database.db")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 LOCAL_AI_URL = os.environ.get("LOCAL_AI_URL", "http://127.0.0.1:8001/read-receipt")
+
+# ---------- Database Initialization ----------
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # People table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS people (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        )
+        """)
+
+        # Bills table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS bills (
+            id TEXT PRIMARY KEY,
+            payer_id TEXT NOT NULL,
+            uploaded_by_id TEXT,
+            month TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            image_path TEXT
+        )
+        """)
+
+        # Items table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS items (
+            id TEXT PRIMARY KEY,
+            bill_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            price REAL NOT NULL,
+            assignee_ids TEXT NOT NULL,
+            needs_review INTEGER DEFAULT 0,
+            translation TEXT,
+            FOREIGN KEY (bill_id) REFERENCES bills (id) ON DELETE CASCADE
+        )
+        """)
+
+        # Logs table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS logs (
+            id TEXT PRIMARY KEY,
+            action TEXT NOT NULL,
+            actor_name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            details TEXT,
+            bill_image_path TEXT
+        )
+        """)
+
+        # Seed initial default people if empty
+        cursor.execute("SELECT COUNT(*) FROM people")
+        if cursor.fetchone()[0] == 0:
+            cursor.executemany("INSERT INTO people (id, name) VALUES (?, ?)", [
+                ("p1", "Omar"),
+                ("p2", "Sarah"),
+                ("p3", "Alex")
+            ])
+        conn.commit()
+
+init_db()
 
 # ---------- Receipt AI Processing ----------
 
 def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
-    """
-    1. Local RTX 5060 Ti eGPU AI server (via LOCAL_AI_URL).
-    2. Free Gemini Vision Cloud API (if GEMINI_API_KEY set).
-    """
     b64_img = base64.b64encode(image_bytes).decode("utf-8")
 
     # 1. Try Local GPU AI server first
@@ -100,7 +158,6 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
                     cleaned = re.sub(r"```\s*", "", cleaned).strip()
                     parsed = json.loads(cleaned)
                     if parsed.get("items"):
-                        print(f"[AI Reader] Successfully extracted {len(parsed['items'])} items via Gemini API!")
                         return parsed["items"]
         except Exception as e:
             print(f"[AI Reader] Gemini API call error: {e}")
@@ -109,7 +166,6 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
     return [
         {"name": "Item 1 (Please check receipt photo)", "price": 0.00}
     ]
-
 
 # ---------- Static File Serving ----------
 
@@ -125,11 +181,13 @@ def static_files(filename):
 
 @app.route("/api/session", methods=["GET"])
 def get_session():
-    return jsonify({
-        "authenticated": True,
-        "person_id": PEOPLE[0]["id"] if PEOPLE else "p1",
-        "name": PEOPLE[0]["name"] if PEOPLE else "Omar"
-    })
+    with get_db() as conn:
+        p = conn.execute("SELECT id, name FROM people LIMIT 1").fetchone()
+        return jsonify({
+            "authenticated": True,
+            "person_id": p["id"] if p else "p1",
+            "name": p["name"] if p else "Omar"
+        })
 
 @app.route("/api/setup/needed", methods=["GET"])
 def setup_needed():
@@ -138,12 +196,15 @@ def setup_needed():
 @app.route("/api/login", methods=["POST"])
 def login():
     data = request.json or {}
-    name = data.get("name", "User")
-    p = next((p for p in PEOPLE if p["name"].lower() == name.lower()), None)
-    if not p:
-        p = {"id": f"p{len(PEOPLE)+1}", "name": name}
-        PEOPLE.append(p)
-    return jsonify({"success": True, "person_id": p["id"], "name": p["name"]})
+    name = data.get("name", "User").strip()
+    with get_db() as conn:
+        p = conn.execute("SELECT * FROM people WHERE LOWER(name) = LOWER(?)", (name,)).fetchone()
+        if not p:
+            new_id = f"p_{int(datetime.now().timestamp())}"
+            conn.execute("INSERT INTO people (id, name) VALUES (?, ?)", (new_id, name))
+            conn.commit()
+            return jsonify({"success": True, "person_id": new_id, "name": name})
+        return jsonify({"success": True, "person_id": p["id"], "name": p["name"]})
 
 @app.route("/api/logout", methods=["POST"])
 def logout():
@@ -151,24 +212,30 @@ def logout():
 
 @app.route("/api/people", methods=["GET", "POST"])
 def manage_people():
-    if request.method == "POST":
-        data = request.json or {}
-        new_p = {"id": f"p{len(PEOPLE)+1}", "name": data.get("name", "Roommate")}
-        PEOPLE.append(new_p)
-        LOGS.insert(0, {
-            "id": f"l{len(LOGS)+1}",
-            "action": "person.create",
-            "actor_name": "Omar",
-            "created_at": datetime.now().isoformat(),
-            "details": {"name": new_p["name"]}
-        })
-        return jsonify(new_p)
-    return jsonify(PEOPLE)
+    with get_db() as conn:
+        if request.method == "POST":
+            data = request.json or {}
+            name = data.get("name", "Roommate").strip()
+            new_id = f"p_{int(datetime.now().timestamp())}"
+            conn.execute("INSERT INTO people (id, name) VALUES (?, ?)", (new_id, name))
+            
+            # Log
+            log_id = f"l_{int(datetime.now().timestamp())}"
+            conn.execute(
+                "INSERT INTO logs (id, action, actor_name, created_at, details) VALUES (?, ?, ?, ?, ?)",
+                (log_id, "person.create", "Omar", datetime.now().isoformat(), json.dumps({"name": name}))
+            )
+            conn.commit()
+            return jsonify({"id": new_id, "name": name})
+
+        people = conn.execute("SELECT id, name FROM people").fetchall()
+        return jsonify([dict(p) for p in people])
 
 @app.route("/api/people/<person_id>", methods=["DELETE"])
 def delete_person(person_id):
-    global PEOPLE
-    PEOPLE = [p for p in PEOPLE if p["id"] != person_id]
+    with get_db() as conn:
+        conn.execute("DELETE FROM people WHERE id = ?", (person_id,))
+        conn.commit()
     return jsonify({"success": True})
 
 @app.route("/api/people/<person_id>/reset-password", methods=["POST"])
@@ -182,8 +249,30 @@ def change_my_password():
 @app.route("/api/bills", methods=["GET"])
 def get_bills():
     month = request.args.get("month")
-    filtered = [b for b in BILLS if not month or b["month"] == month]
-    return jsonify(filtered)
+    with get_db() as conn:
+        query = "SELECT * FROM bills"
+        params = []
+        if month:
+            query += " WHERE month = ?"
+            params.append(month)
+        query += " ORDER BY created_at DESC"
+        
+        bills_rows = conn.execute(query, params).fetchall()
+        bills = []
+
+        for b in bills_rows:
+            bill_dict = dict(b)
+            items_rows = conn.execute("SELECT * FROM items WHERE bill_id = ?", (bill_dict["id"],)).fetchall()
+            items = []
+            for item in items_rows:
+                idict = dict(item)
+                idict["assignee_ids"] = json.loads(idict["assignee_ids"]) if idict["assignee_ids"] else []
+                idict["needs_review"] = bool(idict["needs_review"])
+                items.append(idict)
+            bill_dict["items"] = items
+            bills.append(bill_dict)
+
+        return jsonify(bills)
 
 @app.route("/api/bills/manual", methods=["POST"])
 def add_manual_bill():
@@ -192,37 +281,55 @@ def add_manual_bill():
     month = data.get("month", "2026-08")
     raw_items = data.get("items", [])
 
-    new_items = []
-    for idx, item in enumerate(raw_items):
-        new_items.append({
-            "id": f"i_{datetime.now().timestamp()}_{idx}",
-            "name": item["name"],
-            "price": float(item["price"]),
-            "assignee_ids": item.get("assignee_ids", []),
-            "needs_review": False,
-            "translation": None
-        })
+    bill_id = f"b_{int(datetime.now().timestamp())}"
+    now_iso = datetime.now().isoformat()
 
-    new_bill = {
-        "id": f"b_{int(datetime.now().timestamp())}",
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO bills (id, payer_id, uploaded_by_id, month, created_at, image_path) VALUES (?, ?, ?, ?, ?, ?)",
+            (bill_id, payer_id, "p1", month, now_iso, None)
+        )
+
+        new_items = []
+        for idx, item in enumerate(raw_items):
+            item_id = f"i_{int(datetime.now().timestamp())}_{idx}"
+            assignee_ids = json.dumps(item.get("assignee_ids", []))
+            price = float(item["price"])
+            name = item["name"]
+            
+            conn.execute(
+                "INSERT INTO items (id, bill_id, name, price, assignee_ids, needs_review, translation) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (item_id, bill_id, name, price, assignee_ids, 0, None)
+            )
+            new_items.append({
+                "id": item_id,
+                "bill_id": bill_id,
+                "name": name,
+                "price": price,
+                "assignee_ids": item.get("assignee_ids", []),
+                "needs_review": False,
+                "translation": None
+            })
+
+        # Add Log
+        payer_name = conn.execute("SELECT name FROM people WHERE id = ?", (payer_id,)).fetchone()
+        pname = payer_name["name"] if payer_name else "Someone"
+        log_id = f"l_{int(datetime.now().timestamp())}"
+        conn.execute(
+            "INSERT INTO logs (id, action, actor_name, created_at, details) VALUES (?, ?, ?, ?, ?)",
+            (log_id, "bill.manual_add", pname, now_iso, json.dumps({"item_count": len(new_items)}))
+        )
+        conn.commit()
+
+    return jsonify({
+        "id": bill_id,
         "payer_id": payer_id,
         "uploaded_by_id": "p1",
         "month": month,
-        "created_at": datetime.now().isoformat(),
+        "created_at": now_iso,
         "image_path": None,
         "items": new_items
-    }
-
-    BILLS.insert(0, new_bill)
-    LOGS.insert(0, {
-        "id": f"l{len(LOGS)+1}",
-        "action": "bill.manual_add",
-        "actor_name": next((p["name"] for p in PEOPLE if p["id"] == payer_id), "Someone"),
-        "created_at": datetime.now().isoformat(),
-        "details": {"item_count": len(new_items)}
     })
-
-    return jsonify(new_bill)
 
 @app.route("/api/bills/upload", methods=["POST"])
 def upload_bill():
@@ -245,38 +352,56 @@ def upload_bill():
         img_rel_path = f"/uploads/{save_name}"
         extracted_items = process_receipt_with_ai(file_bytes, file.content_type or "image/jpeg")
 
-    new_items = []
-    for idx, item in enumerate(extracted_items):
-        new_items.append({
-            "id": f"i_{datetime.now().timestamp()}_{idx}",
-            "name": item.get("name", f"Item {idx+1}"),
-            "price": float(item.get("price", 0.00)),
-            "assignee_ids": [],
-            "needs_review": True,
-            "translation": item.get("original_name")
-        })
+    bill_id = f"b_{int(datetime.now().timestamp())}"
+    now_iso = datetime.now().isoformat()
 
-    new_bill = {
-        "id": f"b_{int(datetime.now().timestamp())}",
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO bills (id, payer_id, uploaded_by_id, month, created_at, image_path) VALUES (?, ?, ?, ?, ?, ?)",
+            (bill_id, payer_id, "p1", month, now_iso, img_rel_path)
+        )
+
+        new_items = []
+        for idx, item in enumerate(extracted_items):
+            item_id = f"i_{int(datetime.now().timestamp())}_{idx}"
+            name = item.get("name", f"Item {idx+1}")
+            price = float(item.get("price", 0.00))
+            translation = item.get("original_name")
+            assignee_ids = json.dumps([])
+
+            conn.execute(
+                "INSERT INTO items (id, bill_id, name, price, assignee_ids, needs_review, translation) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (item_id, bill_id, name, price, assignee_ids, 1, translation)
+            )
+
+            new_items.append({
+                "id": item_id,
+                "bill_id": bill_id,
+                "name": name,
+                "price": price,
+                "assignee_ids": [],
+                "needs_review": True,
+                "translation": translation
+            })
+
+        payer_name = conn.execute("SELECT name FROM people WHERE id = ?", (payer_id,)).fetchone()
+        pname = payer_name["name"] if payer_name else "Someone"
+        log_id = f"l_{int(datetime.now().timestamp())}"
+        conn.execute(
+            "INSERT INTO logs (id, action, actor_name, created_at, details, bill_image_path) VALUES (?, ?, ?, ?, ?, ?)",
+            (log_id, "bill.upload", pname, now_iso, json.dumps({"item_count": len(new_items)}), img_rel_path)
+        )
+        conn.commit()
+
+    return jsonify({
+        "id": bill_id,
         "payer_id": payer_id,
         "uploaded_by_id": "p1",
         "month": month,
-        "created_at": datetime.now().isoformat(),
+        "created_at": now_iso,
         "image_path": img_rel_path,
         "items": new_items
-    }
-
-    BILLS.insert(0, new_bill)
-    LOGS.insert(0, {
-        "id": f"l{len(LOGS)+1}",
-        "action": "bill.upload",
-        "actor_name": next((p["name"] for p in PEOPLE if p["id"] == payer_id), "Someone"),
-        "created_at": datetime.now().isoformat(),
-        "details": {"item_count": len(new_items)},
-        "bill_image_path": img_rel_path
     })
-
-    return jsonify(new_bill)
 
 @app.route("/uploads/<path:filename>")
 def serve_upload(filename):
@@ -284,125 +409,157 @@ def serve_upload(filename):
 
 @app.route("/api/bills/<bill_id>", methods=["DELETE"])
 def delete_bill(bill_id):
-    global BILLS
-    BILLS = [b for b in BILLS if b["id"] != bill_id]
+    with get_db() as conn:
+        conn.execute("DELETE FROM items WHERE bill_id = ?", (bill_id,))
+        conn.execute("DELETE FROM bills WHERE id = ?", (bill_id,))
+        conn.commit()
     return jsonify({"success": True})
 
 @app.route("/api/items/<item_id>", methods=["PATCH"])
 def patch_item(item_id):
     data = request.json or {}
-    for bill in BILLS:
-        for item in bill["items"]:
-            if item["id"] == item_id:
-                if "name" in data: item["name"] = data["name"]
-                if "price" in data: item["price"] = float(data["price"])
-                if "translation" in data: item["translation"] = data["translation"]
-                if "needs_review" in data: item["needs_review"] = data["needs_review"]
-                return jsonify(item)
-    return jsonify({"error": "Item not found"}), 404
+    with get_db() as conn:
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        if not item:
+            return jsonify({"error": "Item not found"}), 404
+        
+        idict = dict(item)
+        if "name" in data: idict["name"] = data["name"]
+        if "price" in data: idict["price"] = float(data["price"])
+        if "translation" in data: idict["translation"] = data["translation"]
+        if "needs_review" in data: idict["needs_review"] = 1 if data["needs_review"] else 0
+
+        conn.execute(
+            "UPDATE items SET name = ?, price = ?, translation = ?, needs_review = ? WHERE id = ?",
+            (idict["name"], idict["price"], idict["translation"], idict["needs_review"], item_id)
+        )
+        conn.commit()
+        idict["assignee_ids"] = json.loads(idict["assignee_ids"]) if idict["assignee_ids"] else []
+        idict["needs_review"] = bool(idict["needs_review"])
+        return jsonify(idict)
 
 @app.route("/api/items/<item_id>/assign", methods=["POST"])
 def assign_item(item_id):
     data = request.json or {}
     person_ids = data.get("person_ids", [])
-    for bill in BILLS:
-        for item in bill["items"]:
-            if item["id"] == item_id:
-                item["assignee_ids"] = person_ids
-                return jsonify(item)
+    json_assignees = json.dumps(person_ids)
+
+    with get_db() as conn:
+        conn.execute("UPDATE items SET assignee_ids = ? WHERE id = ?", (json_assignees, item_id))
+        conn.commit()
+        item = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        if item:
+            idict = dict(item)
+            idict["assignee_ids"] = person_ids
+            idict["needs_review"] = bool(idict["needs_review"])
+            return jsonify(idict)
     return jsonify({"error": "Item not found"}), 404
 
 @app.route("/api/items/<item_id>", methods=["DELETE"])
 def delete_item(item_id):
-    for bill in BILLS:
-        bill["items"] = [i for i in bill["items"] if i["id"] != item_id]
+    with get_db() as conn:
+        conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
+        conn.commit()
     return jsonify({"success": True})
 
 @app.route("/api/settlement", methods=["GET"])
 def get_settlement():
     month = request.args.get("month", "2026-08")
-    month_bills = [b for b in BILLS if b["month"] == month]
 
-    all_person_ids = {p["id"]: p["name"] for p in PEOPLE}
+    with get_db() as conn:
+        people_rows = conn.execute("SELECT id, name FROM people").fetchall()
+        all_person_ids = {p["id"]: p["name"] for p in people_rows}
 
-    for bill in month_bills:
-        for item in bill["items"]:
-            for pid in item["assignee_ids"]:
-                if pid.startswith("guest_") and pid not in all_person_ids:
-                    all_person_ids[pid] = pid.replace("guest_", "") + " (Guest)"
+        query = "SELECT * FROM bills WHERE month = ?"
+        bills_rows = conn.execute(query, (month,)).fetchall()
 
-    paid_map = {pid: 0.0 for pid in all_person_ids}
-    share_map = {pid: 0.0 for pid in all_person_ids}
-    unassigned_total = 0.0
+        paid_map = {pid: 0.0 for pid in all_person_ids}
+        share_map = {pid: 0.0 for pid in all_person_ids}
+        unassigned_total = 0.0
 
-    for bill in month_bills:
-        payer = bill["payer_id"]
-        for item in bill["items"]:
-            price = item["price"]
-            if payer in paid_map:
-                paid_map[payer] += price
+        for b in bills_rows:
+            payer_id = b["payer_id"]
+            items_rows = conn.execute("SELECT * FROM items WHERE bill_id = ?", (b["id"],)).fetchall()
 
-            assignees = item["assignee_ids"]
-            if not assignees:
-                unassigned_total += price
-            else:
-                per_person = price / len(assignees)
+            for item in items_rows:
+                price = item["price"]
+                assignees = json.loads(item["assignee_ids"]) if item["assignee_ids"] else []
+
+                # Include guests in all_person_ids if present
                 for pid in assignees:
-                    if pid in share_map:
-                        share_map[pid] += per_person
+                    if pid.startswith("guest_") and pid not in all_person_ids:
+                        all_person_ids[pid] = pid.replace("guest_", "") + " (Guest)"
+                        paid_map[pid] = 0.0
+                        share_map[pid] = 0.0
 
-    balances = []
-    for pid, pname in all_person_ids.items():
-        paid = paid_map.get(pid, 0.0)
-        owed = share_map.get(pid, 0.0)
-        net = paid - owed
-        balances.append({
-            "person_id": pid,
-            "name": pname,
-            "paid": paid,
-            "owed_share": owed,
-            "net": net
-        })
+                if payer_id in paid_map:
+                    paid_map[payer_id] += price
 
-    positives = []
-    negatives = []
+                if not assignees:
+                    unassigned_total += price
+                else:
+                    per_person = price / len(assignees)
+                    for pid in assignees:
+                        if pid in share_map:
+                            share_map[pid] += per_person
 
-    for b in balances:
-        if b["net"] > 0.01:
-            positives.append({"name": b["name"], "amount": b["net"]})
-        elif b["net"] < -0.01:
-            negatives.append({"name": b["name"], "amount": -b["net"]})
-
-    transactions = []
-    i, j = 0, 0
-    while i < len(negatives) and j < len(positives):
-        debtor = negatives[i]
-        creditor = positives[j]
-        settle_amt = min(debtor["amount"], creditor["amount"])
-
-        if settle_amt > 0.01:
-            transactions.append({
-                "from_name": debtor["name"],
-                "to_name": creditor["name"],
-                "amount": round(settle_amt, 2)
+        balances = []
+        for pid, pname in all_person_ids.items():
+            paid = paid_map.get(pid, 0.0)
+            owed = share_map.get(pid, 0.0)
+            net = paid - owed
+            balances.append({
+                "person_id": pid,
+                "name": pname,
+                "paid": paid,
+                "owed_share": owed,
+                "net": net
             })
 
-        debtor["amount"] -= settle_amt
-        creditor["amount"] -= settle_amt
+        positives = [b for b in balances if b["net"] > 0.01]
+        negatives = [b for b in balances if b["net"] < -0.01]
 
-        if debtor["amount"] <= 0.01: i += 1
-        if creditor["amount"] <= 0.01: j += 1
+        # Debt settlement simplification
+        pos_list = [{"name": b["name"], "amount": b["net"]} for b in positives]
+        neg_list = [{"name": b["name"], "amount": -b["net"]} for b in negatives]
 
-    return jsonify({
-        "unassigned_total": unassigned_total,
-        "balances": balances,
-        "transactions": transactions
-    })
+        transactions = []
+        i, j = 0, 0
+        while i < len(neg_list) and j < len(pos_list):
+            debtor = neg_list[i]
+            creditor = pos_list[j]
+            settle_amt = min(debtor["amount"], creditor["amount"])
+
+            if settle_amt > 0.01:
+                transactions.append({
+                    "from_name": debtor["name"],
+                    "to_name": creditor["name"],
+                    "amount": round(settle_amt, 2)
+                })
+
+            debtor["amount"] -= settle_amt
+            creditor["amount"] -= settle_amt
+
+            if debtor["amount"] <= 0.01: i += 1
+            if creditor["amount"] <= 0.01: j += 1
+
+        return jsonify({
+            "unassigned_total": unassigned_total,
+            "balances": balances,
+            "transactions": transactions
+        })
 
 @app.route("/api/logs", methods=["GET"])
 def get_logs():
-    return jsonify(LOGS)
+    with get_db() as conn:
+        logs_rows = conn.execute("SELECT * FROM logs ORDER BY created_at DESC LIMIT 50").fetchall()
+        logs = []
+        for r in logs_rows:
+            d = dict(r)
+            d["details"] = json.loads(d["details"]) if d["details"] else {}
+            logs.append(d)
+        return jsonify(logs)
 
 if __name__ == "__main__":
-    print("Hisab Web Application Server running on http://localhost:8080")
+    print("Hisab Web Server running with SQLite Persistence on http://localhost:8080")
     app.run(host="0.0.0.0", port=8080, debug=False)
