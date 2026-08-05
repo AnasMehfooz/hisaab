@@ -1,68 +1,105 @@
 """
 Hisab Web Application Server
 Serves the improved web frontend and backend APIs.
-Runs on http://localhost:8080
+Runs on Render.com or Localhost.
 """
 
 import os
 import json
+import re
 import base64
 import urllib.request
 import urllib.parse
 from datetime import datetime
-from flask import Flask, send_from_directory, request, jsonify, session
+from flask import Flask, send_from_directory, request, jsonify
 
 app = Flask(__name__, static_folder=".")
 app.secret_key = "hisab_secret_key_local"
 
+# In-memory storage for people, bills, logs
 PEOPLE = [
     {"id": "p1", "name": "Omar"},
     {"id": "p2", "name": "Sarah"},
     {"id": "p3", "name": "Alex"}
 ]
 
-BILLS = [
-    {
-        "id": "b1",
-        "payer_id": "p1",
-        "uploaded_by_id": "p1",
-        "month": "2026-08",
-        "created_at": datetime.now().isoformat(),
-        "image_path": None,
-        "items": [
-            {"id": "i1", "name": "Groceries (Supermarket)", "price": 45.50, "assignee_ids": ["p1", "p2", "p3"], "needs_review": False, "translation": "Weekly essentials"},
-            {"id": "i2", "name": "Cleaning Supplies", "price": 14.20, "assignee_ids": ["p1", "p2"], "needs_review": False, "translation": None}
-        ]
-    },
-    {
-        "id": "b2",
-        "payer_id": "p2",
-        "uploaded_by_id": "p2",
-        "month": "2026-08",
-        "created_at": datetime.now().isoformat(),
-        "image_path": None,
-        "items": [
-            {"id": "i3", "name": "Internet & Wifi Bill", "price": 39.99, "assignee_ids": ["p1", "p2", "p3"], "needs_review": False, "translation": "High speed fiber"}
-        ]
-    }
-]
+BILLS = []
+LOGS = []
 
-LOGS = [
-    {
-        "id": "l1",
-        "action": "bill.manual_add",
-        "actor_name": "Omar",
-        "created_at": datetime.now().isoformat(),
-        "details": {"item_count": 2}
-    },
-    {
-        "id": "l2",
-        "action": "bill.manual_add",
-        "actor_name": "Sarah",
-        "created_at": datetime.now().isoformat(),
-        "details": {"item_count": 1}
-    }
-]
+# Optional Cloud Vision API key (Free Gemini API key for fallback OCR if local GPU is offline)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+LOCAL_AI_URL = os.environ.get("LOCAL_AI_URL", "http://127.0.0.1:8001/read-receipt")
+
+# ---------- Receipt AI Processing ----------
+
+def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
+    """
+    Attempts:
+    1. Local RTX 5060 Ti eGPU AI server (via LOCAL_AI_URL).
+    2. Free Gemini Vision Cloud API (if GEMINI_API_KEY set).
+    3. Intelligent fallback parsing.
+    """
+    b64_img = base64.b64encode(image_bytes).decode("utf-8")
+
+    # 1. Try Local GPU AI server first
+    try:
+        boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
+        body = (
+            f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="file"; filename="receipt.jpg"\r\n'
+            f'Content-Type: {content_type}\r\n\r\n'
+        ).encode('utf-8') + image_bytes + f'\r\n--{boundary}--\r\n'.encode('utf-8')
+        
+        req = urllib.request.Request(
+            LOCAL_AI_URL,
+            data=body,
+            headers={'Content-Type': f'multipart/form-data; boundary={boundary}'}
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            if resp.status == 200:
+                res_data = json.loads(resp.read().decode('utf-8'))
+                if res_data.get("items"):
+                    return res_data["items"]
+    except Exception as e:
+        print(f"[AI Reader] Local GPU AI not reachable ({e}). Trying cloud vision fallback...")
+
+    # 2. Try Free Gemini Vision API if key available
+    if GEMINI_API_KEY:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            prompt_text = """
+            Analyze this receipt image. Extract all purchased item names and prices in euros.
+            Translate item names to English if in another language.
+            Return ONLY valid JSON format:
+            {"items": [{"name": "Item in English", "original_name": "Original Name if translated", "price": 12.99}]}
+            """
+            payload = json.dumps({
+                "contents": [{
+                    "parts": [
+                        {"text": prompt_text},
+                        {"inline_data": {"mime_type": content_type, "data": b64_img}}
+                    ]
+                }]
+            }).encode('utf-8')
+
+            req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status == 200:
+                    res_data = json.loads(resp.read().decode('utf-8'))
+                    text_out = res_data['candidates'][0]['content']['parts'][0]['text']
+                    cleaned = re.sub(r"```json\s*", "", text_out)
+                    cleaned = re.sub(r"```\s*", "", cleaned).strip()
+                    parsed = json.loads(cleaned)
+                    if parsed.get("items"):
+                        return parsed["items"]
+        except Exception as e:
+            print(f"[AI Reader] Gemini API fallback error: {e}")
+
+    # 3. Default generic item if no AI server connected
+    return [
+        {"name": "Purchased Item (Review Receipt Photo)", "price": 0.00}
+    ]
+
 
 # ---------- Static File Serving ----------
 
@@ -80,8 +117,8 @@ def static_files(filename):
 def get_session():
     return jsonify({
         "authenticated": True,
-        "person_id": PEOPLE[0]["id"],
-        "name": PEOPLE[0]["name"]
+        "person_id": PEOPLE[0]["id"] if PEOPLE else "p1",
+        "name": PEOPLE[0]["name"] if PEOPLE else "Omar"
     })
 
 @app.route("/api/setup/needed", methods=["GET"])
@@ -151,7 +188,7 @@ def add_manual_bill():
             "id": f"i_{datetime.now().timestamp()}_{idx}",
             "name": item["name"],
             "price": float(item["price"]),
-            "assignee_ids": item.get("assignee_ids", []), # Unclicked by default
+            "assignee_ids": item.get("assignee_ids", []),
             "needs_review": False,
             "translation": None
         })
@@ -190,41 +227,21 @@ def upload_bill():
         os.makedirs("uploads", exist_ok=True)
         save_name = f"{int(datetime.now().timestamp())}_{file.filename}"
         save_path = os.path.join("uploads", save_name)
-        file.save(save_path)
-        img_rel_path = f"/uploads/{save_name}"
+        file_bytes = file.read()
 
-        try:
-            with open(save_path, "rb") as f:
-                boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
-                body = (
-                    f'--{boundary}\r\n'
-                    f'Content-Disposition: form-data; name="file"; filename="{file.filename}"\r\n'
-                    f'Content-Type: image/jpeg\r\n\r\n'
-                ).encode('utf-8') + f.read() + f'\r\n--{boundary}--\r\n'.encode('utf-8')
-                
-                req = urllib.request.Request(
-                    "http://127.0.0.1:8001/read-receipt",
-                    data=body,
-                    headers={'Content-Type': f'multipart/form-data; boundary={boundary}'}
-                )
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    if resp.status == 200:
-                        res_data = json.loads(resp.read().decode('utf-8'))
-                        extracted_items = res_data.get("items", [])
-        except Exception:
-            extracted_items = [
-                {"name": "Fresh Milk 1.5L", "original_name": "Milch 1.5L", "price": 2.49},
-                {"name": "Whole Wheat Bread", "original_name": "Vollkornbrot 500g", "price": 3.19},
-                {"name": "Organic Eggs (Pack of 10)", "original_name": "Bio Eier 10er", "price": 4.50}
-            ]
+        with open(save_path, "wb") as f:
+            f.write(file_bytes)
+
+        img_rel_path = f"/uploads/{save_name}"
+        extracted_items = process_receipt_with_ai(file_bytes, file.content_type or "image/jpeg")
 
     new_items = []
     for idx, item in enumerate(extracted_items):
         new_items.append({
             "id": f"i_{datetime.now().timestamp()}_{idx}",
             "name": item.get("name", f"Item {idx+1}"),
-            "price": float(item.get("price", 5.00)),
-            "assignee_ids": [], # Items start UNCLICKED by default so user manually checks them!
+            "price": float(item.get("price", 0.00)),
+            "assignee_ids": [],
             "needs_review": True,
             "translation": item.get("original_name")
         })
@@ -377,8 +394,5 @@ def get_logs():
     return jsonify(LOGS)
 
 if __name__ == "__main__":
-    print("==========================================")
-    print("  Hisab Improved Web Server is LIVE!      ")
-    print("  URL: http://localhost:8080              ")
-    print("==========================================")
+    print("Hisab Web Application Server running on http://localhost:8080")
     app.run(host="0.0.0.0", port=8080, debug=False)
