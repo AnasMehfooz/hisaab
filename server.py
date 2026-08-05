@@ -102,48 +102,59 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
     b64_img = base64.b64encode(image_bytes).decode("utf-8")
     gemini_key = get_setting("GEMINI_API_KEY")
 
-    # 1. Try Gemini Vision API if key available (Fast cloud OCR)
+    print(f"[AI Reader] Key available: {bool(gemini_key)}, key prefix: {gemini_key[:8] if gemini_key else 'NONE'}")
+
+    # 1. Gemini Vision API (High Accuracy OCR)
     if gemini_key:
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
-            prompt_text = """
-            Analyze this clothing or store receipt image carefully.
-            Extract all purchased items and their exact final price in euros.
-            Translate item names from German, Dutch, French, Spanish, Arabic, etc. into clear English (e.g. 'Herren-Hose' -> 'Men's Trousers', 'Herren-T-Shirt' -> 'Men's T-Shirt', 'Trinkflasche' -> 'Drinking Bottle').
-
-            Return ONLY valid JSON:
-            {"items": [{"name": "Men's Trousers", "original_name": "Herren-Hose", "price": 7.99}]}
-            """
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+            prompt_text = (
+                "You are a receipt scanner. Look at this receipt image carefully. "
+                "Extract every line item purchased with its price in euros. "
+                "Translate ALL item names into English if they are in German, Dutch, French, Spanish, or Arabic. "
+                "Return ONLY a JSON object like this with no extra text: "
+                '{"items": [{"name": "Item name in English", "original_name": "Original text on receipt", "price": 1.99}]}'
+            )
             payload = json.dumps({
                 "contents": [{
                     "parts": [
                         {"text": prompt_text},
                         {"inline_data": {"mime_type": content_type, "data": b64_img}}
                     ]
-                }]
+                }],
+                "generationConfig": {"temperature": 0.1}
             }).encode('utf-8')
 
             req = urllib.request.Request(
                 url,
                 data=payload,
-                headers={
-                    'Content-Type': 'application/json',
-                    'x-goog-api-key': gemini_key
-                }
+                headers={'Content-Type': 'application/json'}
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                if resp.status == 200:
-                    res_data = json.loads(resp.read().decode('utf-8'))
-                    text_out = res_data['candidates'][0]['content']['parts'][0]['text']
-                    cleaned = re.sub(r"```json\s*", "", text_out)
-                    cleaned = re.sub(r"```\s*", "", cleaned).strip()
-                    parsed = json.loads(cleaned)
-                    if parsed.get("items"):
-                        return parsed["items"]
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                raw = resp.read().decode('utf-8')
+                print(f"[AI Reader] Gemini raw response (first 300 chars): {raw[:300]}")
+                res_data = json.loads(raw)
+                text_out = res_data['candidates'][0]['content']['parts'][0]['text']
+                print(f"[AI Reader] Gemini text output: {text_out[:400]}")
+                cleaned = re.sub(r"```json\s*", "", text_out)
+                cleaned = re.sub(r"```\s*", "", cleaned).strip()
+                # Extract JSON block if surrounded by text
+                match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+                if match:
+                    cleaned = match.group(0)
+                parsed = json.loads(cleaned)
+                if parsed.get("items"):
+                    print(f"[AI Reader] Extracted {len(parsed['items'])} items via Gemini!")
+                    return parsed["items"]
+        except urllib.error.HTTPError as e:
+            body = e.read().decode('utf-8') if e else ''
+            print(f"[AI Reader] Gemini HTTP error {e.code}: {body[:300]}")
         except Exception as e:
-            print(f"[AI Reader] Gemini Vision error: {e}")
+            print(f"[AI Reader] Gemini Vision API error: {type(e).__name__}: {e}")
+    else:
+        print("[AI Reader] No Gemini API key set — skipping AI OCR!")
 
-    # 2. Try Local GPU AI server (fast 2s check)
+    # 2. Try Local GPU AI server
     try:
         boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
         body = (
@@ -151,10 +162,8 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
             f'Content-Disposition: form-data; name="file"; filename="receipt.jpg"\r\n'
             f'Content-Type: {content_type}\r\n\r\n'
         ).encode('utf-8') + image_bytes + f'\r\n--{boundary}--\r\n'.encode('utf-8')
-        
         req = urllib.request.Request(
-            LOCAL_AI_URL,
-            data=body,
+            LOCAL_AI_URL, data=body,
             headers={'Content-Type': f'multipart/form-data; boundary={boundary}'}
         )
         with urllib.request.urlopen(req, timeout=2) as resp:
@@ -165,13 +174,10 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
     except Exception:
         pass
 
-    # 3. Fallback KiK clothing items
+    # 3. Generic fallback — no fake items
+    print("[AI Reader] All AI methods failed. Returning generic placeholder.")
     return [
-        {"name": "Drinking Bottle", "original_name": "Trinkflasche", "price": 2.99},
-        {"name": "Men's Trousers", "original_name": "Herren-Hose", "price": 7.99},
-        {"name": "Men's T-Shirt", "original_name": "Herren-T-Shirt", "price": 1.00},
-        {"name": "Men's Trousers", "original_name": "Herren-Hose", "price": 7.99},
-        {"name": "Men's Underwear / Bottoms", "original_name": "Herren-Unterteile", "price": 4.99}
+        {"name": "Item 1 — Please add items manually or check API key", "price": 0.00}
     ]
 
 # ---------- Static File Serving ----------
