@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hisab — Log In</title>
+  <meta name="theme-color" content="#0d0f14" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+  <div class="centered-page">
+    <div class="card login-card">
+      <div class="login-logo">Hisab</div>
+      <p class="login-subtitle" id="subtitle">Household Expense Tracker</p>
+
+      <!-- Standard Login Form -->
+      <form id="login-form" class="hidden">
+        <div class="login-form-group">
+          <label for="login-name">Your Name</label>
+          <input type="text" id="login-name" autocomplete="username" required placeholder="e.g. Omar" />
+        </div>
+        
+        <div class="login-form-group">
+          <label for="login-password">Password</label>
+          <input type="password" id="login-password" autocomplete="current-password" required placeholder="••••••••" />
+        </div>
+
+        <div class="error-text" id="login-error"></div>
+
+        <button type="submit" class="btn-primary" style="margin-top:8px">Log In</button>
+
+        <p class="login-hint">
+          First time? Enter the name your roommate set up for you, then choose your password on first login.
+        </p>
+      </form>
+
+      <!-- First-Time Household Setup Form -->
+      <form id="bootstrap-form" class="hidden">
+        <p style="font-size:0.83rem;color:var(--text-dim);margin-bottom:16px;">
+          No household setup found. Enter the setup secret and add names + passwords for each roommate.
+        </p>
+
+        <div class="login-form-group">
+          <label for="setup-secret">Setup Secret</label>
+          <input type="password" id="setup-secret" required placeholder="Secret token" />
+        </div>
+
+        <div id="bootstrap-people" style="margin-top:16px"></div>
+
+        <button type="button" id="bootstrap-add-row" class="btn-secondary" style="margin:8px 0 16px;width:100%">
+          + Add roommate
+        </button>
+
+        <div class="error-text" id="bootstrap-error"></div>
+
+        <button type="submit" class="btn-primary">Finish Household Setup</button>
+      </form>
+
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function addBootstrapRow(prefillName = "") {
+      const row = document.createElement("div");
+      row.className = "add-person-row";
+      row.innerHTML = `
+        <input type="text" class="bootstrap-name" placeholder="Name" value="${prefillName}" required />
+        <input type="password" class="bootstrap-password" placeholder="Password" required />
+      `;
+      $("bootstrap-people").appendChild(row);
+    }
+
+    async function init() {
+      let needed = false;
+      try {
+        const res = await fetch("/api/setup/needed");
+        needed = (await res.json()).needed;
+      } catch (e) {}
+
+      if (needed) {
+        $("subtitle").textContent = "Set up your household";
+        $("bootstrap-form").classList.remove("hidden");
+        for (let i = 0; i < 3; i++) addBootstrapRow();
+      } else {
+        $("login-form").classList.remove("hidden");
+      }
+    }
+
+    $("bootstrap-add-row").addEventListener("click", () => addBootstrapRow());
+
+    $("login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errorEl = $("login-error");
+      errorEl.textContent = "";
+      const name = $("login-name").value.trim();
+      const password = $("login-password").value;
+      try {
+        const res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, password }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          errorEl.textContent = body.detail || "Login failed";
+          return;
+        }
+        window.location.href = "/";
+      } catch (err) {
+        errorEl.textContent = "Something went wrong. Please try again.";
+      }
+    });
+
+    $("bootstrap-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errorEl = $("bootstrap-error");
+      errorEl.textContent = "";
+
+      const secret = $("setup-secret").value;
+      const people = Array.from(document.querySelectorAll("#bootstrap-people .add-person-row"))
+        .map((row) => ({
+          name: row.querySelector(".bootstrap-name").value.trim(),
+          password: row.querySelector(".bootstrap-password").value,
+        }))
+        .filter((p) => p.name && p.password);
+
+      if (people.length === 0) {
+        errorEl.textContent = "Add at least one roommate";
+        return;
+      }
+
+      try {
+        const res = await fetch("/api/setup/bootstrap", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ secret, people }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          errorEl.textContent = body.detail || "Setup failed";
+          return;
+        }
+        $("bootstrap-form").classList.add("hidden");
+        $("login-form").classList.remove("hidden");
+        $("subtitle").textContent = "Household created — please log in";
+      } catch (err) {
+        errorEl.textContent = "Something went wrong. Please try again.";
+      }
+    });
+
+    init();
+  </script>
+</body>
+</html>

@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hisab — Household Expense Tracker</title>
+  <meta name="description" content="Split household expenses with your roommates easily. Upload receipts, track spending, and settle up." />
+  <meta name="theme-color" content="#0d0f14" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+  <!-- Spinner Overlay -->
+  <div class="spinner-overlay hidden" id="spinner">
+    <div class="spinner-ring"></div>
+    <div class="spinner-text" id="spinner-text">Working…</div>
+    <div class="spinner-steps" id="spinner-steps">
+      <div class="spinner-step" id="step-0"></div>
+      <div class="spinner-step" id="step-1"></div>
+      <div class="spinner-step" id="step-2"></div>
+    </div>
+  </div>
+
+  <!-- Main Dashboard -->
+  <div class="page hidden" id="dashboard-page">
+
+    <!-- Top Bar -->
+    <div class="top-bar">
+      <h1>Hisab</h1>
+      <div class="top-bar-right">
+        <span class="whoami-label" id="whoami"></span>
+        <button class="btn-link" id="logout-btn" style="padding: 2px 0;">Log out</button>
+      </div>
+    </div>
+
+    <!-- Rolling Month Navigation Carousel -->
+    <div class="card month-roller-card">
+      <button type="button" class="month-nav-btn" id="prev-month-btn" title="Previous Month">‹</button>
+      <div class="month-display-wrap">
+        <span class="month-title" id="month-display-text">August 2026</span>
+        <input type="month" id="month-input" class="hidden" />
+      </div>
+      <button type="button" class="month-nav-btn" id="next-month-btn" title="Next Month">›</button>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="action-row">
+      <button class="btn-primary" id="upload-btn">📷 Upload Receipt</button>
+      <button class="btn-secondary" id="manual-btn">💵 Cash / Quick Expense</button>
+    </div>
+    <input type="file" id="file-input" accept="image/*" class="hidden" />
+
+    <!-- Analytics Chart -->
+    <div class="card analytics-card" id="analytics-section">
+      <div class="analytics-header">
+        <h2>Spending Breakdown</h2>
+        <span class="analytics-total" id="analytics-total"></span>
+      </div>
+      <canvas id="analytics-chart" height="120"></canvas>
+      <div class="chart-legend" id="chart-legend"></div>
+    </div>
+
+    <!-- Bills List -->
+    <div class="section-label" id="bills-section-label"></div>
+    <div id="bills-list"></div>
+
+    <!-- Settlement -->
+    <div class="section-label">Settlement</div>
+    <div class="card settlement-card">
+      <div id="settlement-content"></div>
+    </div>
+
+    <!-- Bottom Links -->
+    <div class="bottom-links">
+      <button class="btn-link" id="manage-people-btn">Manage people</button>
+      <span style="color:var(--text-muted)">·</span>
+      <button class="btn-link" id="activity-log-btn">Activity log</button>
+    </div>
+  </div>
+
+  <!-- ═══════════ MODALS ═══════════ -->
+
+  <!-- Upload — Who Paid? -->
+  <div class="modal-backdrop hidden" id="upload-modal">
+    <div class="modal-sheet">
+      <div class="modal-handle"></div>
+      <h2>Who paid for this receipt?</h2>
+      <div id="upload-payer-list" class="add-person-row" style="flex-wrap:wrap; margin-bottom:18px;"></div>
+      <button class="btn-primary" id="upload-confirm-btn">Choose photo</button>
+    </div>
+  </div>
+
+  <!-- Cash Expense Modal -->
+  <div class="modal-backdrop hidden" id="manual-modal">
+    <div class="modal-sheet">
+      <div class="modal-handle"></div>
+      <div class="close-row"><button class="btn-link" data-close-modal="manual-modal">Close</button></div>
+      <h2>Add Cash / Custom Expense</h2>
+      <p style="font-size:0.82rem;color:var(--text-dim);margin-bottom:14px;">Record a cash payment made without a printed receipt.</p>
+      
+      <label>1. Who paid?</label>
+      <div id="manual-payer-list" class="add-person-row" style="flex-wrap:wrap; margin-bottom:14px;"></div>
+
+      <div class="login-form-group">
+        <label for="cash-title-input">Expense Description / Title</label>
+        <input type="text" id="cash-title-input" placeholder="e.g. Rent, Electricity, Taxi, Takeout" />
+      </div>
+
+      <div class="login-form-group">
+        <label for="cash-amount-input">Total Amount (€)</label>
+        <input type="number" id="cash-amount-input" placeholder="0.00" step="0.01" />
+      </div>
+
+      <label>2. Who is this split amongst? (Click to select)</label>
+      <div id="manual-split-people" class="add-person-row" style="flex-wrap:wrap; margin-bottom:12px;"></div>
+
+      <!-- Third party / Temporary Guest option -->
+      <div style="margin:12px 0; padding:10px; background:var(--bg-2); border-radius:var(--radius-sm); border:1px solid var(--border);">
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer; text-transform:none; font-size:0.85rem; color:var(--text)">
+          <input type="checkbox" id="cash-guest-checkbox" style="width:auto;" />
+          <span>➕ Include a temporary guest (one-off person not in household)</span>
+        </label>
+        <div id="cash-guest-input-wrap" class="hidden" style="margin-top:8px;">
+          <input type="text" id="cash-guest-name" placeholder="Guest Name (e.g. John)" />
+        </div>
+      </div>
+
+      <div class="error-text" id="manual-error"></div>
+      <button class="btn-primary" id="manual-submit-btn" style="margin-top:10px;">Save Cash Expense</button>
+    </div>
+  </div>
+
+  <!-- People Management -->
+  <div class="modal-backdrop hidden" id="people-modal">
+    <div class="modal-sheet">
+      <div class="modal-handle"></div>
+      <div class="close-row"><button class="btn-link" data-close-modal="people-modal">Close</button></div>
+      <h2>People</h2>
+      <ul class="setup-list" id="people-list"></ul>
+      <div class="error-text" id="people-error"></div>
+
+      <div class="divider"></div>
+      <h2>Add a roommate</h2>
+      <div class="login-form-group">
+        <label for="people-name-input">Name</label>
+        <input type="text" id="people-name-input" placeholder="Name" maxlength="100" />
+      </div>
+      <div class="login-form-group">
+        <label for="people-password-input">Password</label>
+        <input type="password" id="people-password-input" placeholder="Password" />
+      </div>
+      <button class="btn-primary" id="people-add-btn">Add roommate</button>
+
+      <div class="divider"></div>
+      <h2>Change my password</h2>
+      <div class="login-form-group">
+        <label for="me-current-password">Current password</label>
+        <input type="password" id="me-current-password" />
+      </div>
+      <div class="login-form-group">
+        <label for="me-new-password">New password</label>
+        <input type="password" id="me-new-password" />
+      </div>
+      <button class="btn-secondary" id="me-change-password-btn">Change my password</button>
+      <div class="error-text" id="me-password-error"></div>
+    </div>
+  </div>
+
+  <!-- Activity Log -->
+  <div class="modal-backdrop hidden" id="logs-modal">
+    <div class="modal-sheet">
+      <div class="modal-handle"></div>
+      <div class="close-row"><button class="btn-link" data-close-modal="logs-modal">Close</button></div>
+      <h2>Activity log</h2>
+      <div id="logs-list"></div>
+      <button class="btn-secondary" id="logs-load-more-btn" style="margin-top:14px;width:100%">Load more</button>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
