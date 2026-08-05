@@ -16,7 +16,6 @@ from flask import Flask, send_from_directory, request, jsonify
 app = Flask(__name__, static_folder=".")
 app.secret_key = "hisab_secret_key_local"
 
-# In-memory storage for people, bills, logs
 PEOPLE = [
     {"id": "p1", "name": "Omar"},
     {"id": "p2", "name": "Sarah"},
@@ -26,18 +25,15 @@ PEOPLE = [
 BILLS = []
 LOGS = []
 
-# Optional Cloud Vision API key (Free Gemini API key for fallback OCR if local GPU is offline)
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 LOCAL_AI_URL = os.environ.get("LOCAL_AI_URL", "http://127.0.0.1:8001/read-receipt")
 
 # ---------- Receipt AI Processing ----------
 
 def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
     """
-    Attempts:
     1. Local RTX 5060 Ti eGPU AI server (via LOCAL_AI_URL).
     2. Free Gemini Vision Cloud API (if GEMINI_API_KEY set).
-    3. Intelligent fallback parsing.
     """
     b64_img = base64.b64encode(image_bytes).decode("utf-8")
 
@@ -68,10 +64,16 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
             prompt_text = """
-            Analyze this receipt image. Extract all purchased item names and prices in euros.
-            Translate item names to English if in another language.
-            Return ONLY valid JSON format:
-            {"items": [{"name": "Item in English", "original_name": "Original Name if translated", "price": 12.99}]}
+            Analyze this receipt image carefully.
+            Extract all purchased items and their exact final price in euros.
+            If item names are in German, Dutch, French, Spanish, Arabic, etc., translate every item name into English!
+
+            Return strictly valid JSON in this exact format:
+            {"items": [{"name": "Item Description in English", "original_name": "Original label if translated", "price": 12.99}]}
+            Rules:
+            1. "name" must be in English.
+            2. "price" must be a float number (e.g. 12.99).
+            3. Do not include tax subtotals or payment lines.
             """
             payload = json.dumps({
                 "contents": [{
@@ -82,8 +84,15 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
                 }]
             }).encode('utf-8')
 
-            req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                headers={
+                    'Content-Type': 'application/json',
+                    'x-goog-api-key': GEMINI_API_KEY
+                }
+            )
+            with urllib.request.urlopen(req, timeout=20) as resp:
                 if resp.status == 200:
                     res_data = json.loads(resp.read().decode('utf-8'))
                     text_out = res_data['candidates'][0]['content']['parts'][0]['text']
@@ -91,13 +100,14 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
                     cleaned = re.sub(r"```\s*", "", cleaned).strip()
                     parsed = json.loads(cleaned)
                     if parsed.get("items"):
+                        print(f"[AI Reader] Successfully extracted {len(parsed['items'])} items via Gemini API!")
                         return parsed["items"]
         except Exception as e:
-            print(f"[AI Reader] Gemini API fallback error: {e}")
+            print(f"[AI Reader] Gemini API call error: {e}")
 
-    # 3. Default generic item if no AI server connected
+    # 3. Default items if AI offline
     return [
-        {"name": "Purchased Item (Review Receipt Photo)", "price": 0.00}
+        {"name": "Item 1 (Please check receipt photo)", "price": 0.00}
     ]
 
 
