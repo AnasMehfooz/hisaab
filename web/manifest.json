@@ -1,0 +1,8 @@
+{
+  "short_name": "Hisaab",
+  "name": "Hisaab — Household Expense Splitter",
+  "start_url": "/",
+  "background_color": "#ffffff",
+  "theme_color": "#34e0a1",
+  "display": "standalone"
+}

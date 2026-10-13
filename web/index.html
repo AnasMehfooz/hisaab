@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hisaab — Split household expenses</title>
+  <meta name="description" content="Upload receipts, split items with your roommates and settle up." />
+  <meta name="theme-color" content="#34e0a1" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%2216%22 fill=%22%2334e0a1%22/%3E%3Ccircle cx=%2210%22 cy=%2213%22 r=%224%22/%3E%3Ccircle cx=%2222%22 cy=%2213%22 r=%224%22/%3E%3C/svg%3E" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+  <!-- Login -->
+  <main id="login-view" class="login hidden">
+    <div class="login-card">
+      <div class="logo logo-lg"><span class="logo-mark" aria-hidden="true"></span>Hisaab</div>
+      <h1>Who's splitting today?</h1>
+      <p class="muted">Enter your name to join your household. New names are added automatically.</p>
+      <form id="login-form">
+        <label class="field">
+          <span>Your name</span>
+          <input id="login-name" type="text" autocomplete="name" placeholder="e.g. Sarah" maxlength="100" required />
+        </label>
+        <p class="error" id="login-error" role="alert"></p>
+        <button class="btn btn-primary btn-block" type="submit">Continue</button>
+      </form>
+      <div id="login-people" class="chip-row"></div>
+    </div>
+  </main>
+
+  <!-- App -->
+  <div id="app-view" class="hidden">
+    <header class="nav">
+      <div class="nav-inner">
+        <a class="logo" href="/"><span class="logo-mark" aria-hidden="true"></span>Hisaab</a>
+        <nav class="nav-links" aria-label="Sections">
+          <a href="#bills" class="nav-link active" data-target="bills">Bills</a>
+          <a href="#settlement" class="nav-link" data-target="settlement">Settle up</a>
+          <button class="nav-link" id="people-btn" type="button">People</button>
+          <button class="nav-link" id="activity-btn" type="button">Activity</button>
+        </nav>
+        <div class="nav-right">
+          <button class="icon-btn" id="ai-btn" type="button" title="AI receipt settings" aria-label="AI receipt settings">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+          </button>
+          <button class="me-pill" id="me-btn" type="button" title="Log out"><span class="avatar avatar-sm" id="me-avatar"></span><span id="me-name"></span></button>
+        </div>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div class="hero-inner">
+        <p class="eyebrow">Household ledger</p>
+        <h1>Split it fairly,<br />settle it quickly.</h1>
+        <div class="month-switch" role="group" aria-label="Month">
+          <button id="prev-month" type="button" aria-label="Previous month">‹</button>
+          <span id="month-label"></span>
+          <button id="next-month" type="button" aria-label="Next month">›</button>
+        </div>
+        <div class="hero-actions">
+          <button class="btn btn-primary" id="upload-btn" type="button">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            Scan receipt
+          </button>
+          <button class="btn btn-light" id="manual-btn" type="button">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+            Cash expense
+          </button>
+        </div>
+        <input type="file" id="file-input" accept="image/*" class="hidden" />
+      </div>
+    </section>
+
+    <main class="layout">
+      <section class="stats" id="stats" aria-label="Month summary"></section>
+
+      <div class="columns">
+        <section id="bills" class="col-main">
+          <div class="section-head">
+            <h2>Bills <span class="count" id="bills-count"></span></h2>
+          </div>
+          <div id="bills-list"></div>
+        </section>
+
+        <aside class="col-side">
+          <section id="settlement" class="panel">
+            <h2>Settle up</h2>
+            <div id="settlement-content"></div>
+          </section>
+          <section class="panel">
+            <h2>Who consumed what</h2>
+            <div id="breakdown"></div>
+          </section>
+        </aside>
+      </div>
+    </main>
+  </div>
+
+  <!-- Spinner -->
+  <div class="overlay hidden" id="spinner" role="status" aria-live="polite">
+    <div class="spinner-card">
+      <div class="spinner-ring"></div>
+      <p id="spinner-text">Working…</p>
+    </div>
+  </div>
+
+  <!-- Modals -->
+  <div class="modal hidden" id="upload-modal" role="dialog" aria-modal="true" aria-labelledby="upload-title">
+    <div class="sheet">
+      <button class="close" data-close aria-label="Close">×</button>
+      <h2 id="upload-title">Who paid for this receipt?</h2>
+      <p class="muted">Items are read and translated by AI, then you assign them to people.</p>
+      <div id="upload-payers" class="chip-row"></div>
+      <button class="btn btn-primary btn-block" id="upload-confirm" type="button">Choose photo</button>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="manual-modal" role="dialog" aria-modal="true" aria-labelledby="manual-title">
+    <div class="sheet">
+      <button class="close" data-close aria-label="Close">×</button>
+      <h2 id="manual-title">Cash / quick expense</h2>
+      <p class="muted">Rent, a taxi, takeout — anything without a printed receipt.</p>
+      <span class="label">Paid by</span>
+      <div id="manual-payers" class="chip-row"></div>
+      <label class="field"><span>Description</span><input id="cash-title" type="text" placeholder="e.g. Electricity" /></label>
+      <label class="field"><span>Amount (€)</span><input id="cash-amount" type="number" inputmode="decimal" step="0.01" min="0" placeholder="0.00" /></label>
+      <span class="label">Split between</span>
+      <div id="manual-split" class="chip-row"></div>
+      <label class="check"><input type="checkbox" id="cash-guest-check" /> Include a one-off guest</label>
+      <input id="cash-guest-name" class="hidden" type="text" placeholder="Guest name" />
+      <p class="error" id="manual-error" role="alert"></p>
+      <button class="btn btn-primary btn-block" id="manual-submit" type="button">Save expense</button>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="people-modal" role="dialog" aria-modal="true" aria-labelledby="people-title">
+    <div class="sheet">
+      <button class="close" data-close aria-label="Close">×</button>
+      <h2 id="people-title">Household</h2>
+      <ul class="people-list" id="people-list"></ul>
+      <form id="people-form" class="inline-form">
+        <input id="people-name" type="text" placeholder="Add a roommate" maxlength="100" required />
+        <button class="btn btn-primary" type="submit">Add</button>
+      </form>
+      <p class="error" id="people-error" role="alert"></p>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="logs-modal" role="dialog" aria-modal="true" aria-labelledby="logs-title">
+    <div class="sheet">
+      <button class="close" data-close aria-label="Close">×</button>
+      <h2 id="logs-title">Activity</h2>
+      <div id="logs-list"></div>
+    </div>
+  </div>
+
+  <div class="modal hidden" id="ai-modal" role="dialog" aria-modal="true" aria-labelledby="ai-title">
+    <div class="sheet">
+      <button class="close" data-close aria-label="Close">×</button>
+      <h2 id="ai-title">AI receipt scanner</h2>
+      <p class="muted">Paste a Gemini API key to enable high-accuracy receipt reading and translation.</p>
+      <label class="field"><span>Gemini API key</span><input id="ai-key" type="password" autocomplete="off" placeholder="AIza…" /></label>
+      <p class="error" id="ai-error" role="alert"></p>
+      <button class="btn btn-primary btn-block" id="ai-save" type="button">Save key</button>
+    </div>
+  </div>
+
+  <div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

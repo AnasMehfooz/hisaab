@@ -3,16 +3,25 @@ Hisab Web Application Server with AI Receipt OCR & SQLite Persistence
 Runs on Render.com or Localhost.
 """
 
-import os, json, re, sqlite3, base64, urllib.request
+import os, json, re, sqlite3, base64, uuid, urllib.request
 from datetime import datetime
 from flask import Flask, send_from_directory, request, jsonify
+from werkzeug.utils import secure_filename
 
-app = Flask(__name__, static_folder=".")
+WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+app = Flask(__name__, static_folder=None)
 app.secret_key = "hisab_secret_key_local"
 
 DB_PATH = os.environ.get("DB_PATH", "database.db")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 LOCAL_AI_URL = os.environ.get("LOCAL_AI_URL", "http://127.0.0.1:8001/read-receipt")
+
+def new_id(prefix):
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+def current_user_id():
+    """Person id the frontend sends in X-Hisaab-User (identity is name-based, no passwords)."""
+    return request.headers.get("X-Hisaab-User") or None
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -140,11 +149,11 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
 
 @app.route("/")
 def index():
-    return send_from_directory(".", "index.html")
+    return send_from_directory(WEB_DIR, "index.html")
 
 @app.route("/<path:filename>")
 def static_files(filename):
-    return send_from_directory(".", filename)
+    return send_from_directory(WEB_DIR, filename)
 
 @app.route("/api/settings", methods=["GET", "POST"])
 def settings_api():
@@ -176,10 +185,10 @@ def login():
     with get_db() as conn:
         p = conn.execute("SELECT * FROM people WHERE LOWER(name) = LOWER(?)", (name,)).fetchone()
         if not p:
-            new_id = f"p_{int(datetime.now().timestamp())}"
-            conn.execute("INSERT INTO people (id, name) VALUES (?, ?)", (new_id, name))
+            pid = new_id("p")
+            conn.execute("INSERT INTO people (id, name) VALUES (?, ?)", (pid, name))
             conn.commit()
-            return jsonify({"success": True, "person_id": new_id, "name": name})
+            return jsonify({"success": True, "person_id": pid, "name": name})
         return jsonify({"success": True, "person_id": p["id"], "name": p["name"]})
 
 @app.route("/api/logout", methods=["POST"])
@@ -192,12 +201,13 @@ def manage_people():
         if request.method == "POST":
             data = request.json or {}
             name = data.get("name", "Roommate").strip()
-            new_id = f"p_{int(datetime.now().timestamp())}"
-            conn.execute("INSERT INTO people (id, name) VALUES (?, ?)", (new_id, name))
+            pid = new_id("p")
+            conn.execute("INSERT INTO people (id, name) VALUES (?, ?)", (pid, name))
+            actor = conn.execute("SELECT name FROM people WHERE id = ?", (current_user_id(),)).fetchone()
             conn.execute("INSERT INTO logs (id, action, actor_name, created_at, details) VALUES (?, ?, ?, ?, ?)",
-                (f"l_{int(datetime.now().timestamp())}", "person.create", "Omar", datetime.now().isoformat(), json.dumps({"name": name})))
+                (new_id("l"), "person.create", actor["name"] if actor else "Someone", datetime.now().isoformat(), json.dumps({"name": name})))
             conn.commit()
-            return jsonify({"id": new_id, "name": name})
+            return jsonify({"id": pid, "name": name})
         people = conn.execute("SELECT id, name FROM people").fetchall()
         return jsonify([dict(p) for p in people])
 
@@ -242,22 +252,22 @@ def add_manual_bill():
     payer_id = data.get("payer_id")
     month = data.get("month", "2026-08")
     raw_items = data.get("items", [])
-    bill_id = f"b_{int(datetime.now().timestamp())}"
+    bill_id = new_id("b")
     now_iso = datetime.now().isoformat()
     with get_db() as conn:
         conn.execute("INSERT INTO bills (id, payer_id, uploaded_by_id, month, created_at, image_path) VALUES (?, ?, ?, ?, ?, ?)",
-            (bill_id, payer_id, "p1", month, now_iso, None))
+            (bill_id, payer_id, current_user_id(), month, now_iso, None))
         new_items = []
         for idx, item in enumerate(raw_items):
-            item_id = f"i_{int(datetime.now().timestamp())}_{idx}"
+            item_id = new_id("i")
             conn.execute("INSERT INTO items (id, bill_id, name, price, assignee_ids, needs_review, translation) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (item_id, bill_id, item["name"], float(item["price"]), json.dumps(item.get("assignee_ids", [])), 0, None))
             new_items.append({"id": item_id, "bill_id": bill_id, "name": item["name"], "price": float(item["price"]), "assignee_ids": item.get("assignee_ids", []), "needs_review": False, "translation": None})
         pn = conn.execute("SELECT name FROM people WHERE id = ?", (payer_id,)).fetchone()
         conn.execute("INSERT INTO logs (id, action, actor_name, created_at, details) VALUES (?, ?, ?, ?, ?)",
-            (f"l_{int(datetime.now().timestamp())}", "bill.manual_add", pn["name"] if pn else "Someone", now_iso, json.dumps({"item_count": len(new_items)})))
+            (new_id("l"), "bill.manual_add", pn["name"] if pn else "Someone", now_iso, json.dumps({"item_count": len(new_items)})))
         conn.commit()
-    return jsonify({"id": bill_id, "payer_id": payer_id, "uploaded_by_id": "p1", "month": month, "created_at": now_iso, "image_path": None, "items": new_items})
+    return jsonify({"id": bill_id, "payer_id": payer_id, "uploaded_by_id": current_user_id(), "month": month, "created_at": now_iso, "image_path": None, "items": new_items})
 
 @app.route("/api/bills/upload", methods=["POST"])
 def upload_bill():
@@ -268,20 +278,20 @@ def upload_bill():
     extracted_items = []
     if file:
         os.makedirs("uploads", exist_ok=True)
-        save_name = f"{int(datetime.now().timestamp())}_{file.filename}"
+        save_name = f"{uuid.uuid4().hex[:12]}_{secure_filename(file.filename or 'receipt.jpg')}"
         file_bytes = file.read()
         with open(os.path.join("uploads", save_name), "wb") as f:
             f.write(file_bytes)
         img_rel_path = f"/uploads/{save_name}"
         extracted_items = process_receipt_with_ai(file_bytes, file.content_type or "image/jpeg")
-    bill_id = f"b_{int(datetime.now().timestamp())}"
+    bill_id = new_id("b")
     now_iso = datetime.now().isoformat()
     with get_db() as conn:
         conn.execute("INSERT INTO bills (id, payer_id, uploaded_by_id, month, created_at, image_path) VALUES (?, ?, ?, ?, ?, ?)",
-            (bill_id, payer_id, "p1", month, now_iso, img_rel_path))
+            (bill_id, payer_id, current_user_id(), month, now_iso, img_rel_path))
         new_items = []
         for idx, item in enumerate(extracted_items):
-            item_id = f"i_{int(datetime.now().timestamp())}_{idx}"
+            item_id = new_id("i")
             name = item.get("name", f"Item {idx+1}")
             price = float(item.get("price", 0.00))
             translation = item.get("original_name")
@@ -290,9 +300,9 @@ def upload_bill():
             new_items.append({"id": item_id, "bill_id": bill_id, "name": name, "price": price, "assignee_ids": [], "needs_review": True, "translation": translation})
         pn = conn.execute("SELECT name FROM people WHERE id = ?", (payer_id,)).fetchone()
         conn.execute("INSERT INTO logs (id, action, actor_name, created_at, details, bill_image_path) VALUES (?, ?, ?, ?, ?, ?)",
-            (f"l_{int(datetime.now().timestamp())}", "bill.upload", pn["name"] if pn else "Someone", now_iso, json.dumps({"item_count": len(new_items)}), img_rel_path))
+            (new_id("l"), "bill.upload", pn["name"] if pn else "Someone", now_iso, json.dumps({"item_count": len(new_items)}), img_rel_path))
         conn.commit()
-    return jsonify({"id": bill_id, "payer_id": payer_id, "uploaded_by_id": "p1", "month": month, "created_at": now_iso, "image_path": img_rel_path, "items": new_items})
+    return jsonify({"id": bill_id, "payer_id": payer_id, "uploaded_by_id": current_user_id(), "month": month, "created_at": now_iso, "image_path": img_rel_path, "items": new_items})
 
 @app.route("/uploads/<path:filename>")
 def serve_upload(filename):
