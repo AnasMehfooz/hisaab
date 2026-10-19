@@ -49,6 +49,59 @@ def get_setting(key_name, default=""):
         if row and row["value"]: return row["value"]
     return os.environ.get(key_name, default)
 
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-flash-latest"]
+
+RECEIPT_SKIP = ("summe", "total", "zwischen", "mwst", "ust", "steuer", "brutto", "netto", "bezahl", "karte",
+                "bar ", "gegeben", "rückgeld", "rueckgeld", "wechselgeld", "posten", "anzahl", "inkl", "exkl",
+                "girocard", "visa", "mastercard", "eur ", "betrag", "kundenbeleg", "datum", "uhrzeit",
+                "alter preis", "preisänderung", "preisaenderung", "kasse", "filiale")
+# Price at line end, optionally followed by a tax-class code (A/B/1/2/*) as on German receipts: "Milch 1,19 A"
+PRICE_RE = re.compile(r"(-?\d{1,4}[,.]\d{2})\s*(?:[A-D12*]{1,2})?\s*$")
+QTY_RE = re.compile(r"^\s*[=*]?\s*\d+\s*[xX×*]\s*(\d{1,4}[,.]\d{2})?\s*")
+
+ARTICLE_NO_RE = re.compile(r"^\d{4,}\s+")
+
+def parse_receipt_text(text):
+    """Best-effort item extraction from raw OCR text of a (German) receipt."""
+    items, pending_name = [], None
+    for raw in text.splitlines():
+        line = re.sub(r"\s+", " ", raw.replace("\t", " ")).strip()
+        low = line.lower() + " "
+        if low.startswith(("summe", "total", "zu zahlen", "gesamt")):
+            break  # everything after the total is payment/tax info
+        m = PRICE_RE.search(line)
+        if not m:
+            # Name-only line: on many receipts the quantity/price follows on the next line
+            name = ARTICLE_NO_RE.sub("", line).strip(" .:-€")
+            letters = len(re.sub(r"[^A-Za-zÄÖÜäöüß]", "", name))
+            pending_name = name if letters >= 3 and not any(w in low for w in RECEIPT_SKIP) else None
+            continue
+        price = float(m.group(1).replace(",", "."))
+        name = ARTICLE_NO_RE.sub("", line[:m.start()]).strip(" .:-€")
+        if any(w in name.lower() + " " for w in RECEIPT_SKIP):
+            pending_name = None
+            continue
+        if QTY_RE.match(name) and not QTY_RE.sub("", name).strip():
+            # "3 x 0,89   2,67": quantity line for the name on the previous line
+            if pending_name:
+                items.append({"name": pending_name, "original_name": pending_name, "price": round(price, 2)})
+            elif items:
+                items[-1]["price"] = round(price, 2)
+            pending_name = None
+            continue
+        name = QTY_RE.sub("", name).strip()
+        if price < 0:  # discount line ("Rabatt -0,50") applies to the previous item
+            if items:
+                items[-1]["price"] = round(items[-1]["price"] + price, 2)
+            pending_name = None
+            continue
+        if len(re.sub(r"[^A-Za-zÄÖÜäöüß]", "", name)) < 2:
+            name = pending_name or ""
+        pending_name = None
+        if name and price > 0:
+            items.append({"name": name, "original_name": name, "price": round(price, 2)})
+    return items
+
 def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
     b64_img = base64.b64encode(image_bytes).decode("utf-8")
     gemini_key = get_setting("GEMINI_API_KEY", GEMINI_API_KEY)
@@ -56,21 +109,22 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
 
     # 1. Gemini Vision API
     if gemini_key:
-        for model in ["gemini-2.0-flash-001", "gemini-2.0-flash-lite", "gemini-flash-latest"]:
+        for model in GEMINI_MODELS:
             try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
                 prompt = (
-                    "You are a receipt scanner. Extract every purchased line item and its price in euros. "
-                    "Translate all item names to English. "
-                    "Return ONLY valid JSON with no other text: "
-                    "{\"items\": [{\"name\": \"English item name\", \"original_name\": \"text from receipt\", \"price\": 1.99}]}"
+                    "You are a receipt scanner. Extract every purchased line item and its final price in euros "
+                    "(after any per-line discount; multiply quantity x unit price if the receipt shows both). "
+                    "Skip totals, subtotals, tax lines, deposits returned, payment and change lines. "
+                    "Translate item names to short, plain English. "
+                    "Return JSON: {\"items\": [{\"name\": \"English item name\", \"original_name\": \"text from receipt\", \"price\": 1.99}]}"
                 )
                 payload = json.dumps({
                     "contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": content_type, "data": b64_img}}]}],
-                    "generationConfig": {"temperature": 0.1}
+                    "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}
                 }).encode("utf-8")
-                req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-                with urllib.request.urlopen(req, timeout=25) as resp:
+                req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json", "x-goog-api-key": gemini_key})
+                with urllib.request.urlopen(req, timeout=45) as resp:
                     res_data = json.loads(resp.read().decode("utf-8"))
                     text_out = res_data["candidates"][0]["content"]["parts"][0]["text"]
                     print(f"[AI] Gemini {model}: {text_out[:200]}")
@@ -99,7 +153,11 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
             "Content-Disposition: form-data; name=\"base64Image\"\r\n\r\n"
             f"data:{content_type};base64,{b64_img}\r\n"
             f"--{boundary}\r\n"
-            "Content-Disposition: form-data; name=\"language\"\r\n\r\neng\r\n"
+            "Content-Disposition: form-data; name=\"language\"\r\n\r\nger\r\n"
+            f"--{boundary}\r\n"
+            "Content-Disposition: form-data; name=\"isTable\"\r\n\r\ntrue\r\n"
+            f"--{boundary}\r\n"
+            "Content-Disposition: form-data; name=\"OCREngine\"\r\n\r\n2\r\n"
             f"--{boundary}\r\n"
             "Content-Disposition: form-data; name=\"isOverlayRequired\"\r\n\r\nfalse\r\n"
             f"--{boundary}\r\n"
@@ -115,16 +173,7 @@ def process_receipt_with_ai(image_bytes, content_type="image/jpeg"):
             ocr_text = ocr_data.get("ParsedResults", [{}])[0].get("ParsedText", "")
             if ocr_text:
                 print(f"[AI] OCR.space text: {ocr_text[:300]}")
-                items = []
-                skip_words = ["summe","total","mwst","ust","brutto","netto","bezahl","karte","posten","anzahl","inkl","exkl"]
-                for line in ocr_text.split("\n"):
-                    line = line.strip()
-                    pm = re.search(r"(\d+[,\.]\d{2})\s*$", line)
-                    if pm:
-                        price = float(pm.group(1).replace(",", "."))
-                        name = line[:pm.start()].strip()
-                        if name and price > 0 and not any(s in name.lower() for s in skip_words):
-                            items.append({"name": name, "original_name": name, "price": price})
+                items = parse_receipt_text(ocr_text)
                 if items:
                     print(f"[AI] OCR.space extracted {len(items)} items!")
                     return items
